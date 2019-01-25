@@ -37,4 +37,4 @@ The only current use case is to find broken links but this may be expanded.
 
 ## Git Hooks
 
-[https://golang.org/misc/git/pre-commit](Pre commit check)
+[Pre commit check](https://golang.org/misc/git/pre-commit)
