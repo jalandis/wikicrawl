@@ -10,23 +10,67 @@ import (
 	"testing"
 )
 
+type expectedCounts struct {
+	linkCount    int
+	brokenCount  int
+	requestCount int
+}
+
+func validateCrawl(t *testing.T, expected expectedCounts, handler func(http.ResponseWriter, *http.Request)) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		requests++
+		handler(rw, req)
+	}))
+	defer server.Close()
+
+	result := NewCrawler(server.URL, "").Crawl(server.URL)
+	if len(result.Visited.Set) != expected.linkCount {
+		t.Errorf(`Visited links do not match expected.
+			Expected %d, found %d.`, expected.linkCount, len(result.Visited.Set))
+	}
+
+	if len(result.Broken.Set) != expected.brokenCount {
+		t.Errorf(`Broken links do not match expected.
+			Expected %d, found %d.`, expected.brokenCount, len(result.Broken.Set))
+	}
+
+	if requests != expected.requestCount {
+		t.Errorf(`Crawler should only request every internal link once.
+			Expected %d, found %d.`, expected.requestCount, requests)
+	}
+}
+
 func TestCrawl(t *testing.T) {
 
 	t.Run("Mocking web crawl tests", func(t *testing.T) {
-		t.Run("Validate single page", func(t *testing.T) {
+		t.Run("Validate single page with multiple links", func(t *testing.T) {
 			t.Parallel()
+			ex := expectedCounts{linkCount: 3, brokenCount: 0, requestCount: 3}
+			validateCrawl(t, ex, func(rw http.ResponseWriter, req *http.Request) {
+				fmt.Fprintf(rw, `<html><body><a href="/path1" /><a href="/path2" /></body></html>`)
+			})
+		})
 
-			// Mock server.
-			server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-				fmt.Fprintf(rw, `<html><body><a href="%s/path" /></body></html>`, req.URL.Path)
-			}))
-			defer server.Close()
+		t.Run("Avoid duplicate requests", func(t *testing.T) {
+			t.Parallel()
+			ex := expectedCounts{linkCount: 2, brokenCount: 0, requestCount: 2}
+			validateCrawl(t, ex, func(rw http.ResponseWriter, req *http.Request) {
+				fmt.Fprintf(rw, `<html><body><a href="/path" /><a href="/path" /></body></html>`)
+			})
+		})
 
-			c := NewCrawler(server.URL)
-			result := c.Crawl(server.URL)
-			if len(result.Links) != 1 {
-				t.Errorf("Visited links do not match expected. %s", server.URL)
-			}
+		t.Run("Record broken links", func(t *testing.T) {
+			t.Parallel()
+			ex := expectedCounts{linkCount: 3, brokenCount: 1, requestCount: 3}
+			validateCrawl(t, ex, func(rw http.ResponseWriter, req *http.Request) {
+				if req.URL.Path == "/error" {
+					rw.WriteHeader(500)
+					return
+				}
+
+				fmt.Fprintf(rw, `<html><body><a href="/path" /><a href="/error" /></body></html>`)
+			})
 		})
 	})
 }
@@ -48,8 +92,8 @@ func TestValidateLink(t *testing.T) {
 	t.Run("Validate Wikimedia links", func(t *testing.T) {
 		t.Run("Validate successful link", func(t *testing.T) {
 			t.Parallel()
-			link := "http://testing.com?title=Accept"
-			c := NewCrawler("http://testing.com")
+			link, _ := url.Parse("http://testing.com?title=Accept")
+			c := NewCrawler("http://testing.com", "")
 			if !c.ValidateLink(link) {
 				t.Errorf("Url incorrectly marked as invalid: %s.", link)
 			}
@@ -57,8 +101,8 @@ func TestValidateLink(t *testing.T) {
 
 		t.Run("Validate link with missing title", func(t *testing.T) {
 			t.Parallel()
-			link := "http://testing.com?notitle=1"
-			c := NewCrawler("http://testing.com")
+			link, _ := url.Parse("http://testing.com?notitle=1")
+			c := NewCrawler("http://testing.com", "")
 			if !c.ValidateLink(link) {
 				t.Errorf("Url incorrectly marked as invalid: %s.", link)
 			}
@@ -66,8 +110,8 @@ func TestValidateLink(t *testing.T) {
 
 		t.Run("Skip outside link", func(t *testing.T) {
 			t.Parallel()
-			link := "http://otherdomain.com?title=Accept"
-			c := NewCrawler("http://testing.com")
+			link, _ := url.Parse("http://otherdomain.com?title=Accept")
+			c := NewCrawler("http://testing.com", "")
 			if c.ValidateLink(link) {
 				t.Errorf("Url incorrectly marked as valid: %s.", link)
 			}
@@ -75,13 +119,21 @@ func TestValidateLink(t *testing.T) {
 
 		t.Run("Skip forbidden pages", func(t *testing.T) {
 			t.Parallel()
-			link := "http://testing.com?title=Help:Skip"
-			c := NewCrawler("http://testing.com")
+			link, _ := url.Parse("http://testing.com?title=Help:Skip")
+			c := NewCrawler("http://testing.com", "")
 			if c.ValidateLink(link) {
 				t.Errorf("Url incorrectly marked as valid: %s.", link)
 			}
 		})
 	})
+}
+
+func validateParseLinks(t *testing.T, html string, expected LinkSet) {
+	found := ParseLinks(strings.NewReader(html))
+
+	if !reflect.DeepEqual(found, expected) {
+		t.Errorf("Parsing links failed, got: %v, want: %v.", found, expected)
+	}
 }
 
 func TestParseLinks(t *testing.T) {
@@ -90,36 +142,30 @@ func TestParseLinks(t *testing.T) {
 			t.Parallel()
 			html := `<html><body><a href="testing"></body></html>`
 
-			found := ParseLinks(strings.NewReader(html))
-			expected := []string{"testing"}
+			expected := NewLinkSet()
+			expected.Add("testing")
 
-			if !reflect.DeepEqual(found, expected) {
-				t.Errorf("Parsing links failed, got: %s, want: %s.", found, expected)
-			}
+			validateParseLinks(t, html, expected)
 		})
 
 		t.Run("Malformed HTML missing closing body tag", func(t *testing.T) {
 			t.Parallel()
 			html := `<html><body><a href="testing"></html>`
 
-			found := ParseLinks(strings.NewReader(html))
-			expected := []string{"testing"}
+			expected := NewLinkSet()
+			expected.Add("testing")
 
-			if !reflect.DeepEqual(found, expected) {
-				t.Errorf("Parsing links failed, got: %s, want: %s.", found, expected)
-			}
+			validateParseLinks(t, html, expected)
 		})
 
 		t.Run("Parsing self closing tag", func(t *testing.T) {
 			t.Parallel()
 			html := `<html><body><a href="testing" /></body></html>`
 
-			found := ParseLinks(strings.NewReader(html))
-			expected := []string{"testing"}
+			expected := NewLinkSet()
+			expected.Add("testing")
 
-			if !reflect.DeepEqual(found, expected) {
-				t.Errorf("Parsing links failed, got: %s, want: %s.", found, expected)
-			}
+			validateParseLinks(t, html, expected)
 		})
 	})
 }

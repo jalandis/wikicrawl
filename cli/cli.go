@@ -9,16 +9,14 @@ import (
 
 func main() {
 	wiki := flag.String("wiki", "wiki_url", "a string")
+	session := flag.String("session", "session", "a string")
 	flag.Parse()
 
-	c := wikicrawl.NewCrawler(*wiki)
+	c := wikicrawl.NewCrawler(*wiki, *session)
 	result := c.Crawl(*wiki)
 
-	for url, set := range result.Links {
-		fmt.Println("Visited link: " + url)
-		for key, _ := range set.Set {
-			fmt.Println("Link referenced from: " + key)
-		}
+	for key, _ := range result.Visited.Set {
+		fmt.Println("Visited link: " + key)
 	}
 
 	for key, _ := range result.Broken.Set {
